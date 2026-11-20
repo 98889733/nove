@@ -1,0 +1,60 @@
+name: Build desktop apps
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find project (newest zip wins, otherwise plain files)
+        id: proj
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          rm -rf _src && mkdir _src
+          list=$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' -not -path './_src/*')
+          zip=""
+          if [ -n "$list" ]; then zip=$(ls -t $list | head -1); fi
+          if [ -n "$zip" ]; then
+            echo "Using zip: $zip"
+            "$PY" -m zipfile -e "$zip" _src
+            f=$(find _src -maxdepth 4 -name package.json -not -path '*/node_modules/*' | head -1)
+          else
+            f=$(find . -maxdepth 3 -name package.json -not -path './node_modules/*' -not -path './_src/*' | head -1)
+          fi
+          if [ -z "$f" ]; then
+            echo "::error::package.json not found. Upload NOVA-Desktop.zip (or the project files) to the repository."
+            find . -maxdepth 3 -not -path './.git/*' | head -60
+            exit 1
+          fi
+          echo "Project dir: $(dirname "$f")"
+          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: npm install
+
+      - name: Build
+        working-directory: ${{ steps.proj.outputs.dir }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-Desktop-${{ matrix.os }}
+          path: |
+            ${{ steps.proj.outputs.dir }}/dist/*.exe
+            ${{ steps.proj.outputs.dir }}/dist/*.zip
+            ${{ steps.proj.outputs.dir }}/dist/*.AppImage
+            ${{ steps.proj.outputs.dir }}/dist/*.dmg
