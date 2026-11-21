@@ -12,29 +12,71 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find project (newest zip wins, otherwise plain files)
+      - name: Find project (any zip name, highest version wins; otherwise plain files)
         id: proj
         shell: bash
         run: |
           PY=$(command -v python3 || command -v python)
-          rm -rf _src && mkdir _src
-          list=$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' -not -path './_src/*')
-          zip=""
-          if [ -n "$list" ]; then zip=$(ls -t $list | head -1); fi
-          if [ -n "$zip" ]; then
-            echo "Using zip: $zip"
-            "$PY" -m zipfile -e "$zip" _src
-            f=$(find _src -maxdepth 4 -name package.json -not -path '*/node_modules/*' | head -1)
-          else
-            f=$(find . -maxdepth 3 -name package.json -not -path './node_modules/*' -not -path './_src/*' | head -1)
-          fi
-          if [ -z "$f" ]; then
-            echo "::error::package.json not found. Upload NOVA-Desktop.zip (or the project files) to the repository."
-            find . -maxdepth 3 -not -path './.git/*' | head -60
-            exit 1
-          fi
-          echo "Project dir: $(dirname "$f")"
-          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+          "$PY" - <<'PYEOF'
+          import os, sys, json, zipfile, re, shutil
+
+          def ver(s):
+              return tuple(int(x) if x.isdigit() else 0 for x in re.split(r'[.\-]', str(s)))
+
+          best = None
+          for dp, dn, fn in os.walk('.'):
+              dn[:] = [d for d in dn if d not in ('.git', 'node_modules', '_src')]
+              if dp.count(os.sep) > 3:
+                  dn[:] = []
+              for f in fn:
+                  if not f.lower().endswith('.zip'):
+                      continue
+                  p = os.path.join(dp, f)
+                  try:
+                      with zipfile.ZipFile(p) as z:
+                          pk = [n for n in z.namelist() if n.endswith('package.json') and 'node_modules' not in n and n.count('/') <= 2]
+                          if not pk:
+                              continue
+                          pk.sort(key=lambda n: n.count('/'))
+                          v = ver(json.loads(z.read(pk[0])).get('version', '0'))
+                  except Exception:
+                      continue
+                  key = (v, os.path.getmtime(p))
+                  if best is None or key > best[0]:
+                      best = (key, p)
+
+          dest = None
+          if best:
+              print('Using zip:', best[1])
+              shutil.rmtree('_src', ignore_errors=True)
+              with zipfile.ZipFile(best[1]) as z:
+                  z.extractall('_src')
+              for dp, dn, fn in os.walk('_src'):
+                  if 'package.json' in fn and 'node_modules' not in dp:
+                      dest = dp
+                      break
+          else:
+              for dp, dn, fn in os.walk('.'):
+                  dn[:] = [d for d in dn if d not in ('.git', 'node_modules', '_src')]
+                  if 'package.json' in fn:
+                      dest = dp
+                      break
+
+          if not dest:
+              print('::error::package.json not found. Upload NOVA-Desktop.zip (or the project files) to the repository.')
+              for dp, dn, fn in os.walk('.'):
+                  dn[:] = [d for d in dn if d != '.git']
+                  if dp.count(os.sep) > 2:
+                      dn[:] = []
+                  for f in fn:
+                      print(os.path.join(dp, f))
+              sys.exit(1)
+
+          dest = dest.replace('\\', '/')
+          print('Project dir:', dest)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('dir=' + dest + '\n')
+          PYEOF
 
       - uses: actions/setup-node@v4
         with:
